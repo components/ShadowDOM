@@ -1,7 +1,7 @@
 {
   "name": "shadowdom-polyfill",
   "description": "Enables ShadomDOM for X-Tag components",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "author": "Arron Schaar",
   "dependencies": {},
   "devDependencies": {
