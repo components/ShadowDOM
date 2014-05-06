@@ -1,5 +1,8 @@
-## ShadowDOM Polyfill Bower Shim
+## ShadowDOM Polyfill Shim
 
+This repo wraps Polymer/ShadowDOM so that it works with various package managers.
 
-
-
+### Bower
+```
+  bower install ShadowDOM
+```
