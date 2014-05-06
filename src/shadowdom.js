@@ -853,21 +853,10 @@ window.ShadowDOMPolyfill = {};
    * A tree scope represents the root of a tree. All nodes in a tree point to
    * the same TreeScope object. The tree scope of a node get set the first time
    * it is accessed or when a node is added or remove to a tree.
-   *
-   * The root is a Node that has no parent.
-   *
-   * The parent is another TreeScope. For ShadowRoots, it is the TreeScope of
-   * the host of the ShadowRoot.
-   *
-   * @param {!Node} root
-   * @param {TreeScope} parent
    * @constructor
    */
   function TreeScope(root, parent) {
-    /** @type {!Node} */
     this.root = root;
-
-    /** @type {TreeScope} */
     this.parent = parent;
   }
 
@@ -901,10 +890,6 @@ window.ShadowDOMPolyfill = {};
   }
 
   function getTreeScope(node) {
-    if (node instanceof scope.wrappers.Window) {
-      debugger;
-    }
-
     if (node.treeScope_)
       return node.treeScope_;
     var parent = node.parentNode;
@@ -954,192 +939,140 @@ window.ShadowDOMPolyfill = {};
     return node instanceof wrappers.ShadowRoot;
   }
 
-  function rootOfNode(node) {
-    return getTreeScope(node).root;
+  function isInsertionPoint(node) {
+    var localName = node.localName;
+    return localName === 'content' || localName === 'shadow';
   }
 
-  // http://w3c.github.io/webcomponents/spec/shadow/#event-paths
-  function getEventPath(node, event) {
-    var path = [];
-    var current = node;
-    path.push(current);
-    while (current) {
-      // 4.1.
-      var destinationInsertionPoints = getDestinationInsertionPoints(current);
-      if (destinationInsertionPoints && destinationInsertionPoints.length > 0) {
-        // 4.1.1
-        for (var i = 0; i < destinationInsertionPoints.length; i++) {
-          var insertionPoint = destinationInsertionPoints[i];
-          // 4.1.1.1
-          if (isShadowInsertionPoint(insertionPoint)) {
-            var shadowRoot = rootOfNode(insertionPoint);
-            // 4.1.1.1.2
-            var olderShadowRoot = shadowRoot.olderShadowRoot;
-            if (olderShadowRoot)
-              path.push(olderShadowRoot);
-          }
+  function isShadowHost(node) {
+    return !!node.shadowRoot;
+  }
 
-          // 4.1.1.2
-          path.push(insertionPoint);
-        }
+  function getEventParent(node) {
+    var dv;
+    return node.parentNode || (dv = node.defaultView) && wrap(dv) || null;
+  }
 
-        // 4.1.2
-        current = destinationInsertionPoints[
-            destinationInsertionPoints.length - 1];
+  // https://dvcs.w3.org/hg/webcomponents/raw-file/tip/spec/shadow/index.html#dfn-adjusted-parent
+  function calculateParents(node, context, ancestors) {
+    if (ancestors.length)
+      return ancestors.shift();
 
-      // 4.2
-      } else {
-        if (isShadowRoot(current)) {
-          if (inSameTree(node, current) && eventMustBeStopped(event)) {
-            // Stop this algorithm
-            break;
-          }
-          current = current.host;
-          path.push(current);
+    // 1.
+    if (isShadowRoot(node))
+      return getInsertionParent(node) || node.host;
 
-        // 4.2.2
-        } else {
-          current = current.parentNode;
-          if (current)
-            path.push(current);
+    // 2.
+    var eventParents = scope.eventParentsTable.get(node);
+    if (eventParents) {
+      // Copy over the remaining event parents for next iteration.
+      for (var i = 1; i < eventParents.length; i++) {
+        ancestors[i - 1] = eventParents[i];
+      }
+      return eventParents[0];
+    }
+
+    // 3.
+    if (context && isInsertionPoint(node)) {
+      var parentNode = node.parentNode;
+      if (parentNode && isShadowHost(parentNode)) {
+        var trees = scope.getShadowTrees(parentNode);
+        var p = getInsertionParent(context);
+        for (var i = 0; i < trees.length; i++) {
+          if (trees[i].contains(p))
+            return p;
         }
       }
     }
 
-    return path;
+    return getEventParent(node);
   }
 
-  // http://w3c.github.io/webcomponents/spec/shadow/#dfn-events-always-stopped
-  function eventMustBeStopped(event) {
-    if (!event)
-      return false;
-
-    switch (event.type) {
-      case 'abort':
-      case 'error':
-      case 'select':
-      case 'change':
-      case 'load':
-      case 'reset':
-      case 'resize':
-      case 'scroll':
-      case 'selectstart':
-        return true;
-    }
-    return false;
-  }
-
-  // http://w3c.github.io/webcomponents/spec/shadow/#dfn-shadow-insertion-point
-  function isShadowInsertionPoint(node) {
-    return node instanceof HTMLShadowElement;
-    // and make sure that there are no shadow precing this?
-    // and that there is no content ancestor?
-  }
-
-  function getDestinationInsertionPoints(node) {
-    return scope.getDestinationInsertionPoints(node);
-  }
-
-  // http://w3c.github.io/webcomponents/spec/shadow/#event-retargeting
-  function eventRetargetting(path, currentTarget) {
-    if (path.length === 0)
-      return currentTarget;
-
-    // The currentTarget might be the window object. Use its document for the
-    // purpose of finding the retargetted node.
-    if (currentTarget instanceof wrappers.Window)
-      currentTarget = currentTarget.document;
-
-    var currentTargetTree = getTreeScope(currentTarget);
-    var originalTarget = path[0];
-    var originalTargetTree = getTreeScope(originalTarget);
-    var relativeTargetTree =
-        lowestCommonInclusiveAncestor(currentTargetTree, originalTargetTree);
-
-    for (var i = 0; i < path.length; i++) {
-      var node = path[i];
-      if (getTreeScope(node) === relativeTargetTree)
-        return node;
-    }
-
-    return path[path.length - 1];
-  }
-
-  function getTreeScopeAncestors(treeScope) {
+  // https://dvcs.w3.org/hg/webcomponents/raw-file/tip/spec/shadow/index.html#event-retargeting
+  function retarget(node) {
+    var stack = [];  // 1.
+    var ancestor = node;  // 2.
+    var targets = [];
     var ancestors = [];
-    for (;treeScope; treeScope = treeScope.parent) {
-      ancestors.push(treeScope);
-    }
-    return ancestors;
-  }
-
-  function lowestCommonInclusiveAncestor(tsA, tsB) {
-    var ancestorsA = getTreeScopeAncestors(tsA);
-    var ancestorsB = getTreeScopeAncestors(tsB);
-
-    var result = null;
-    while (ancestorsA.length > 0 && ancestorsB.length > 0) {
-      var a = ancestorsA.pop();
-      var b = ancestorsB.pop();
-      if (a === b)
-        result = a;
-      else
-        break;
-    }
-    return result;
-  }
-
-  function getTreeScopeRoot(ts) {
-    if (!ts.parent)
-      return ts;
-    return getTreeScopeRoot(ts.parent);
-  }
-
-  function relatedTargetResolution(event, currentTarget, relatedTarget) {
-    // In case the current target is a window use its document for the purpose
-    // of retargetting the related target.
-    if (currentTarget instanceof wrappers.Window)
-      currentTarget = currentTarget.document;
-
-    var currentTargetTree = getTreeScope(currentTarget);
-    var relatedTargetTree = getTreeScope(relatedTarget);
-
-    var relatedTargetEventPath = getEventPath(relatedTarget, event);
-
-    var lowestCommonAncestorTree;
-
-    // 4
-    var lowestCommonAncestorTree =
-        lowestCommonInclusiveAncestor(currentTargetTree, relatedTargetTree);
-
-    // 5
-    if (!lowestCommonAncestorTree)
-      lowestCommonAncestorTree = relatedTargetTree.root;
-
-    // 6
-    for (var commonAncestorTree = lowestCommonAncestorTree;
-         commonAncestorTree;
-         commonAncestorTree = commonAncestorTree.parent) {
-      // 6.1
-      var adjustedRelatedTarget;
-      for (var i = 0; i < relatedTargetEventPath.length; i++) {
-        var node = relatedTargetEventPath[i];
-        if (getTreeScope(node) === commonAncestorTree)
-          return node;
+    while (ancestor) {  // 3.
+      var context = null;  // 3.2.
+      // TODO(arv): Change order of these. If the stack is empty we always end
+      // up pushing ancestor, no matter what.
+      if (isInsertionPoint(ancestor)) {  // 3.1.
+        context = topMostNotInsertionPoint(stack);  // 3.1.1.
+        var top = stack[stack.length - 1] || ancestor;  // 3.1.2.
+        stack.push(top);
+      } else if (!stack.length) {
+        stack.push(ancestor);  // 3.3.
       }
-    }
+      var target = stack[stack.length - 1];  // 3.4.
+      targets.push({target: target, currentTarget: ancestor});  // 3.5.
+      if (isShadowRoot(ancestor))  // 3.6.
+        stack.pop();  // 3.6.1.
 
+      ancestor = calculateParents(ancestor, context, ancestors);  // 3.7.
+    }
+    return targets;
+  }
+
+  function topMostNotInsertionPoint(stack) {
+    for (var i = stack.length - 1; i >= 0; i--) {
+      if (!isInsertionPoint(stack[i]))
+        return stack[i];
+    }
     return null;
+  }
+
+  // https://dvcs.w3.org/hg/webcomponents/raw-file/tip/spec/shadow/index.html#dfn-adjusted-related-target
+  function adjustRelatedTarget(target, related) {
+    var ancestors = [];
+    while (target) {  // 3.
+      var stack = [];  // 3.1.
+      var ancestor = related;  // 3.2.
+      var last = undefined;  // 3.3. Needs to be reset every iteration.
+      while (ancestor) {
+        var context = null;
+        if (!stack.length) {
+          stack.push(ancestor);
+        } else {
+          if (isInsertionPoint(ancestor)) {  // 3.4.3.
+            context = topMostNotInsertionPoint(stack);
+            // isDistributed is more general than checking whether last is
+            // assigned into ancestor.
+            if (isDistributed(last)) {  // 3.4.3.2.
+              var head = stack[stack.length - 1];
+              stack.push(head);
+            }
+          }
+        }
+
+        if (inSameTree(ancestor, target))  // 3.4.4.
+          return stack[stack.length - 1];
+
+        if (isShadowRoot(ancestor))  // 3.4.5.
+          stack.pop();
+
+        last = ancestor;  // 3.4.6.
+        ancestor = calculateParents(ancestor, context, ancestors);  // 3.4.7.
+      }
+      if (isShadowRoot(target))  // 3.5.
+        target = target.host;
+      else
+        target = target.parentNode;  // 3.6.
+    }
+  }
+
+  function getInsertionParent(node) {
+    return scope.insertionParentTable.get(node);
+  }
+
+  function isDistributed(node) {
+    return getInsertionParent(node);
   }
 
   function inSameTree(a, b) {
     return getTreeScope(a) === getTreeScope(b);
   }
-
-  var NONE = 0;
-  var CAPTURING_PHASE = 1;
-  var AT_TARGET = 2;
-  var BUBBLING_PHASE = 3;
 
   // pendingError is used to rethrow the first error we got during an event
   // dispatch. The browser actually reports all errors but to do that we would
@@ -1159,117 +1092,100 @@ window.ShadowDOMPolyfill = {};
     }
   }
 
+  function isLoadLikeEvent(event) {
+    switch (event.type) {
+      case 'beforeunload':
+      case 'load':
+      case 'unload':
+        return true;
+    }
+    return false;
+  }
+
   function dispatchEvent(event, originalWrapperTarget) {
     if (currentlyDispatchingEvents.get(event))
-      throw new Error('InvalidStateError');
-
+      throw new Error('InvalidStateError')
     currentlyDispatchingEvents.set(event, true);
 
     // Render to ensure that the event path is correct.
     scope.renderAllPending();
-    var eventPath;
+    var eventPath = retarget(originalWrapperTarget);
 
-    // http://www.whatwg.org/specs/web-apps/current-work/multipage/webappapis.html#events-and-the-window-object
-    // All events dispatched on Nodes with a default view, except load events,
-    // should propagate to the Window.
-
+    // For window "load" events the "load" event is dispatched at the window but
+    // the target is set to the document.
+    //
     // http://www.whatwg.org/specs/web-apps/current-work/multipage/the-end.html#the-end
-    var overrideTarget;
-    var win;
-    var type = event.type;
-
-    // Should really be not cancelable too but since Firefox has a bug there
-    // we skip that check.
-    // https://bugzilla.mozilla.org/show_bug.cgi?id=999456
-    if (type === 'load' && !event.bubbles) {
-      var doc = originalWrapperTarget;
-      if (doc instanceof wrappers.Document && (win = doc.defaultView)) {
-        overrideTarget = doc;
-        eventPath = [];
-      }
-    }
-
-    if (!eventPath) {
-      if (originalWrapperTarget instanceof wrappers.Window) {
-        win = originalWrapperTarget;
-        eventPath = [];
-      } else {
-        eventPath = getEventPath(originalWrapperTarget, event);
-
-        if (event.type !== 'load') {
-          var doc = eventPath[eventPath.length - 1];
-          if (doc instanceof wrappers.Document)
-            win = doc.defaultView;
-        }
-      }
+    //
+    // TODO(arv): Find a less hacky way to do this.
+    if (eventPath.length === 2 &&
+        eventPath[0].target instanceof wrappers.Document &&
+        isLoadLikeEvent(event)) {
+      eventPath.shift();
     }
 
     eventPathTable.set(event, eventPath);
 
-    if (dispatchCapturing(event, eventPath, win, overrideTarget)) {
-      if (dispatchAtTarget(event, eventPath, win, overrideTarget)) {
-        dispatchBubbling(event, eventPath, win, overrideTarget);
+    if (dispatchCapturing(event, eventPath)) {
+      if (dispatchAtTarget(event, eventPath)) {
+        dispatchBubbling(event, eventPath);
       }
     }
 
-    eventPhaseTable.set(event, NONE);
+    eventPhaseTable.set(event, Event.NONE);
     currentTargetTable.delete(event, null);
     currentlyDispatchingEvents.delete(event);
 
     return event.defaultPrevented;
   }
 
-  function dispatchCapturing(event, eventPath, win, overrideTarget) {
-    var phase = CAPTURING_PHASE;
-
-    if (win) {
-      if (!invoke(win, event, phase, eventPath, overrideTarget))
-        return false;
-    }
+  function dispatchCapturing(event, eventPath) {
+    var phase;
 
     for (var i = eventPath.length - 1; i > 0; i--) {
-      if (!invoke(eventPath[i], event, phase, eventPath, overrideTarget))
+      var target = eventPath[i].target;
+      var currentTarget = eventPath[i].currentTarget;
+      if (target === currentTarget)
+        continue;
+
+      phase = Event.CAPTURING_PHASE;
+      if (!invoke(eventPath[i], event, phase))
         return false;
     }
 
     return true;
   }
 
-  function dispatchAtTarget(event, eventPath, win, overrideTarget) {
-    var phase = AT_TARGET;
-    var currentTarget = eventPath[0] || win;
-    return invoke(currentTarget, event, phase, eventPath, overrideTarget);
+  function dispatchAtTarget(event, eventPath) {
+    var phase = Event.AT_TARGET;
+    return invoke(eventPath[0], event, phase);
   }
 
-  function dispatchBubbling(event, eventPath, win, overrideTarget) {
-    var phase = BUBBLING_PHASE;
+  function dispatchBubbling(event, eventPath) {
+    var bubbles = event.bubbles;
+    var phase;
+
     for (var i = 1; i < eventPath.length; i++) {
-      if (!invoke(eventPath[i], event, phase, eventPath, overrideTarget))
+      var target = eventPath[i].target;
+      var currentTarget = eventPath[i].currentTarget;
+      if (target === currentTarget)
+        phase = Event.AT_TARGET;
+      else if (bubbles && !stopImmediatePropagationTable.get(event))
+        phase = Event.BUBBLING_PHASE;
+      else
+        continue;
+
+      if (!invoke(eventPath[i], event, phase))
         return;
     }
-
-    if (win && eventPath.length > 0) {
-      invoke(win, event, phase, eventPath, overrideTarget);
-    }
   }
 
-  function invoke(currentTarget, event, phase, eventPath, overrideTarget) {
+  function invoke(tuple, event, phase) {
+    var target = tuple.target;
+    var currentTarget = tuple.currentTarget;
+
     var listeners = listenersTable.get(currentTarget);
     if (!listeners)
       return true;
-
-    var target = overrideTarget || eventRetargetting(eventPath, currentTarget);
-
-    if (target === currentTarget) {
-      if (phase === CAPTURING_PHASE)
-        return true;
-
-      if (phase === BUBBLING_PHASE)
-         phase = AT_TARGET;
-
-    } else if (phase === BUBBLING_PHASE && !event.bubbles) {
-      return true;
-    }
 
     if ('relatedTarget' in event) {
       var originalEvent = unwrap(event);
@@ -1287,8 +1203,7 @@ window.ShadowDOMPolyfill = {};
             unwrappedRelatedTarget.addEventListener) {
           var relatedTarget = wrap(unwrappedRelatedTarget);
 
-          var adjusted =
-              relatedTargetResolution(event, currentTarget, relatedTarget);
+          var adjusted = adjustRelatedTarget(currentTarget, relatedTarget);
           if (adjusted === target)
             return true;
         } else {
@@ -1302,7 +1217,6 @@ window.ShadowDOMPolyfill = {};
     var type = event.type;
 
     var anyRemoved = false;
-    // targetTable.set(event, target);
     targetTable.set(event, target);
     currentTargetTable.set(event, currentTarget);
 
@@ -1314,8 +1228,8 @@ window.ShadowDOMPolyfill = {};
       }
 
       if (listener.type !== type ||
-          !listener.capture && phase === CAPTURING_PHASE ||
-          listener.capture && phase === BUBBLING_PHASE) {
+          !listener.capture && phase === Event.CAPTURING_PHASE ||
+          listener.capture && phase === Event.BUBBLING_PHASE) {
         continue;
       }
 
@@ -1407,7 +1321,7 @@ window.ShadowDOMPolyfill = {};
         var baseRoot = getTreeScope(currentTargetTable.get(this));
 
         for (var i = 0; i <= lastIndex; i++) {
-          var currentTarget = eventPath[i];
+          var currentTarget = eventPath[i].currentTarget;
           var currentRoot = getTreeScope(currentTarget);
           if (currentRoot.contains(baseRoot) &&
               // Make sure we do not add Window to the path.
@@ -1750,8 +1664,13 @@ window.ShadowDOMPolyfill = {};
     scope.renderAllPending();
 
     var element = wrap(originalElementFromPoint.call(document.impl, x, y));
-    var path = getEventPath(element, null);
-    return eventRetargetting(path, self);
+    var targets = retarget(element, this)
+    for (var i = 0; i < targets.length; i++) {
+      var target = targets[i];
+      if (target.currentTarget === self)
+        return target.target;
+    }
+    return null;
   }
 
   /**
@@ -1805,6 +1724,7 @@ window.ShadowDOMPolyfill = {};
     };
   }
 
+  scope.adjustRelatedTarget = adjustRelatedTarget;
   scope.elementFromPoint = elementFromPoint;
   scope.getEventHandlerGetter = getEventHandlerGetter;
   scope.getEventHandlerSetter = getEventHandlerSetter;
@@ -1818,132 +1738,6 @@ window.ShadowDOMPolyfill = {};
   scope.wrappers.UIEvent = UIEvent;
 
 })(window.ShadowDOMPolyfill);
-
-/*
- * Copyright 2014 The Polymer Authors. All rights reserved.
- * Use of this source code is goverened by a BSD-style
- * license that can be found in the LICENSE file.
- */
-
-(function(scope) {
-  'use strict';
-
-  var UIEvent = scope.wrappers.UIEvent;
-  var mixin = scope.mixin;
-  var registerWrapper = scope.registerWrapper;
-  var unwrap = scope.unwrap;
-  var wrap = scope.wrap;
-
-  // TouchEvent is WebKit/Blink only.
-  var OriginalTouchEvent = window.TouchEvent;
-  if (!OriginalTouchEvent)
-    return;
-
-  var nativeEvent;
-  try {
-    nativeEvent = document.createEvent('TouchEvent');
-  } catch (ex) {
-    // In Chrome creating a TouchEvent fails if the feature is not turned on
-    // which it isn't on desktop Chrome.
-    return;
-  }
-
-  var nonEnumDescriptor = {enumerable: false};
-
-  function nonEnum(obj, prop) {
-    Object.defineProperty(obj, prop, nonEnumDescriptor);
-  }
-
-  function Touch(impl) {
-    this.impl = impl;
-  }
-
-  Touch.prototype = {
-    get target() {
-      return wrap(this.impl.target);
-    }
-  };
-
-  var descr = {
-    configurable: true,
-    enumerable: true,
-    get: null
-  };
-
-  [
-    'clientX',
-    'clientY',
-    'screenX',
-    'screenY',
-    'pageX',
-    'pageY',
-    'identifier',
-    'webkitRadiusX',
-    'webkitRadiusY',
-    'webkitRotationAngle',
-    'webkitForce'
-  ].forEach(function(name) {
-    descr.get = function() {
-      return this.impl[name];
-    };
-    Object.defineProperty(Touch.prototype, name, descr);
-  });
-
-  function TouchList() {
-    this.length = 0;
-    nonEnum(this, 'length');
-  }
-
-  TouchList.prototype = {
-    item: function(index) {
-      return this[index];
-    }
-  };
-
-  function wrapTouchList(nativeTouchList) {
-    var list = new TouchList();
-    for (var i = 0; i < nativeTouchList.length; i++) {
-      list[i] = new Touch(nativeTouchList[i]);
-    }
-    list.length = i;
-    return list;
-  }
-
-  function TouchEvent(impl) {
-    UIEvent.call(this, impl);
-  }
-
-  TouchEvent.prototype = Object.create(UIEvent.prototype);
-
-  mixin(TouchEvent.prototype, {
-    get touches() {
-      return wrapTouchList(unwrap(this).touches);
-    },
-
-    get targetTouches() {
-      return wrapTouchList(unwrap(this).targetTouches);
-    },
-
-    get changedTouches() {
-      return wrapTouchList(unwrap(this).changedTouches);
-    },
-
-    initTouchEvent: function() {
-      // The only way to use this is to reuse the TouchList from an existing
-      // TouchEvent. Since this is WebKit/Blink proprietary API we will not
-      // implement this until someone screams.
-      throw new Error('Not implemented');
-    }
-  });
-
-  registerWrapper(OriginalTouchEvent, TouchEvent, nativeEvent);
-
-  scope.wrappers.Touch = Touch;
-  scope.wrappers.TouchEvent = TouchEvent;
-  scope.wrappers.TouchList = TouchList;
-
-})(window.ShadowDOMPolyfill);
-
 
 // Copyright 2012 The Polymer Authors. All rights reserved.
 // Use of this source code is goverened by a BSD-style
@@ -3098,8 +2892,6 @@ window.ShadowDOMPolyfill = {};
       return this.impl.polymerShadowRoot_ || null;
     },
 
-    // getDestinationInsertionPoints added in ShadowRenderer.js
-
     setAttribute: function(name, value) {
       var oldValue = this.impl.getAttribute(name);
       this.impl.setAttribute(name, value);
@@ -3548,6 +3340,8 @@ window.ShadowDOMPolyfill = {};
     }
 
     // getDistributedNodes is added in ShadowRenderer
+
+    // TODO: attribute boolean resetStyleInheritance;
   });
 
   if (OriginalHTMLContentElement)
@@ -3609,7 +3403,6 @@ window.ShadowDOMPolyfill = {};
 
   var HTMLElement = scope.wrappers.HTMLElement;
   var mixin = scope.mixin;
-  var NodeList = scope.wrappers.NodeList;
   var registerWrapper = scope.registerWrapper;
 
   var OriginalHTMLShadowElement = window.HTMLShadowElement;
@@ -3618,8 +3411,9 @@ window.ShadowDOMPolyfill = {};
     HTMLElement.call(this, node);
   }
   HTMLShadowElement.prototype = Object.create(HTMLElement.prototype);
-
-  // getDistributedNodes is added in ShadowRenderer
+  mixin(HTMLShadowElement.prototype, {
+    // TODO: attribute boolean resetStyleInheritance;
+  });
 
   if (OriginalHTMLShadowElement)
     registerWrapper(OriginalHTMLShadowElement, HTMLShadowElement);
@@ -4427,11 +4221,10 @@ window.ShadowDOMPolyfill = {};
     // DocumentFragment instance. Override that.
     rewrap(node, this);
 
+    this.treeScope_ = new TreeScope(this, getTreeScope(hostWrapper));
+
     var oldShadowRoot = hostWrapper.shadowRoot;
     nextOlderShadowTreeTable.set(this, oldShadowRoot);
-
-    this.treeScope_ =
-        new TreeScope(this, getTreeScope(oldShadowRoot || hostWrapper));
 
     shadowHostTable.set(this, hostWrapper);
   }
@@ -4571,18 +4364,29 @@ window.ShadowDOMPolyfill = {};
     parentNode.removeChild(node);
   }
 
-  var distributedNodesTable = new WeakMap();
-  var destinationInsertionPointsTable = new WeakMap();
+  var distributedChildNodesTable = new WeakMap();
+  var eventParentsTable = new WeakMap();
+  var insertionParentTable = new WeakMap();
   var rendererForHostTable = new WeakMap();
 
-  function resetDistributedNodes(insertionPoint) {
-    distributedNodesTable.set(insertionPoint, []);
+  function distributeChildToInsertionPoint(child, insertionPoint) {
+    getDistributedChildNodes(insertionPoint).push(child);
+    assignToInsertionPoint(child, insertionPoint);
+
+    var eventParents = eventParentsTable.get(child);
+    if (!eventParents)
+      eventParentsTable.set(child, eventParents = []);
+    eventParents.push(insertionPoint);
   }
 
-  function getDistributedNodes(insertionPoint) {
-    var rv = distributedNodesTable.get(insertionPoint);
+  function resetDistributedChildNodes(insertionPoint) {
+    distributedChildNodesTable.set(insertionPoint, []);
+  }
+
+  function getDistributedChildNodes(insertionPoint) {
+    var rv = distributedChildNodesTable.get(insertionPoint);
     if (!rv)
-      distributedNodesTable.set(insertionPoint, rv = []);
+      distributedChildNodesTable.set(insertionPoint, rv = []);
     return rv;
   }
 
@@ -4592,6 +4396,92 @@ window.ShadowDOMPolyfill = {};
       result[i++] = child;
     }
     return result;
+  }
+
+  /**
+   * Visits all nodes in the tree that fulfils the |predicate|. If the |visitor|
+   * function returns |false| the traversal is aborted.
+   * @param {!Node} tree
+   * @param {function(!Node) : boolean} predicate
+   * @param {function(!Node) : *} visitor
+   */
+  function visit(tree, predicate, visitor) {
+    // This operates on logical DOM.
+    for (var node = tree.firstChild; node; node = node.nextSibling) {
+      if (predicate(node)) {
+        if (visitor(node) === false)
+          return;
+      } else {
+        visit(node, predicate, visitor);
+      }
+    }
+  }
+
+  // Matching Insertion Points
+  // http://dvcs.w3.org/hg/webcomponents/raw-file/tip/spec/shadow/index.html#matching-insertion-points
+
+  // TODO(arv): Verify this... I don't remember why I picked this regexp.
+  var selectorMatchRegExp = /^[*.:#[a-zA-Z_|]/;
+
+  var allowedPseudoRegExp = new RegExp('^:(' + [
+    'link',
+    'visited',
+    'target',
+    'enabled',
+    'disabled',
+    'checked',
+    'indeterminate',
+    'nth-child',
+    'nth-last-child',
+    'nth-of-type',
+    'nth-last-of-type',
+    'first-child',
+    'last-child',
+    'first-of-type',
+    'last-of-type',
+    'only-of-type',
+  ].join('|') + ')');
+
+
+  /**
+   * @param {Element} node
+   * @oaram {Element} point The insertion point element.
+   * @return {boolean} Whether the node matches the insertion point.
+   */
+  function matchesCriteria(node, point) {
+    var select = point.getAttribute('select');
+    if (!select)
+      return true;
+
+    // Here we know the select attribute is a non empty string.
+    select = select.trim();
+    if (!select)
+      return true;
+
+    if (!(node instanceof Element))
+      return false;
+
+    // The native matches function in IE9 does not correctly work with elements
+    // that are not in the document.
+    // TODO(arv): Implement matching in JS.
+    // https://github.com/Polymer/ShadowDOM/issues/361
+    if (select === '*' || select === node.localName)
+      return true;
+
+    // TODO(arv): This does not seem right. Need to check for a simple selector.
+    if (!selectorMatchRegExp.test(select))
+      return false;
+
+    // TODO(arv): This no longer matches the spec.
+    if (select[0] === ':' && !allowedPseudoRegExp.test(select))
+      return false;
+
+    try {
+      return node.matches(select);
+    } catch (ex) {
+      // Invalid selector.
+      return false;
+    }
   }
 
   var request = oneOf(window, [
@@ -4738,14 +4628,19 @@ window.ShadowDOMPolyfill = {};
         return;
 
       this.invalidateAttributes();
+      this.treeComposition();
 
       var host = this.host;
+      var shadowRoot = host.shadowRoot;
 
-      this.distribution(host);
+      this.associateNode(host);
+      var topMostRenderer = !renderNode;
       var renderNode = opt_renderNode || new RenderNode(host);
-      this.buildRenderTree(renderNode, host);
 
-      var topMostRenderer = !opt_renderNode;
+      for (var node = shadowRoot.firstChild; node; node = node.nextSibling) {
+        this.renderNode(shadowRoot, renderNode, node, false);
+      }
+
       if (topMostRenderer)
         renderNode.sync();
 
@@ -4766,152 +4661,77 @@ window.ShadowDOMPolyfill = {};
       }
     },
 
-    // http://w3c.github.io/webcomponents/spec/shadow/#distribution-algorithms
-    distribution: function(root) {
-      this.resetAll(root);
-      this.distributionResolution(root);
-    },
-
-    resetAll: function(node) {
-      if (isInsertionPoint(node))
-        resetDistributedNodes(node);
-      else
-        resetDestinationInsertionPoints(node);
-
-      for (var child = node.firstChild; child; child = child.nextSibling) {
-        this.resetAll(child);
-      }
-
-      if (node.shadowRoot)
-        this.resetAll(node.shadowRoot);
-
-      if (node.olderShadowRoot)
-        this.resetAll(node.olderShadowRoot);
-    },
-
-    // http://w3c.github.io/webcomponents/spec/shadow/#distribution-results
-    distributionResolution: function(node) {
+    renderNode: function(shadowRoot, renderNode, node, isNested) {
       if (isShadowHost(node)) {
-        var shadowHost = node;
-        // 1.1
-        var pool = poolPopulation(shadowHost);
-
-        var shadowTrees = getShadowTrees(shadowHost);
-
-        // 1.2
-        for (var i = 0; i < shadowTrees.length; i++) {
-          // 1.2.1
-          this.poolDistribution(shadowTrees[i], pool);
-        }
-
-        // 1.3
-        for (var i = shadowTrees.length - 1; i >= 0; i--) {
-          var shadowTree = shadowTrees[i];
-
-          // 1.3.1
-          // TODO(arv): We should keep the shadow insertion points on the
-          // shadow root (or renderer) so we don't have to search the tree
-          // every time.
-          var shadow = getShadowInsertionPoint(shadowTree);
-
-          // 1.3.2
-          if (shadow) {
-
-            // 1.3.2.1
-            var olderShadowRoot = shadowTree.olderShadowRoot;
-            if (olderShadowRoot) {
-              // 1.3.2.1.1
-              pool = poolPopulation(olderShadowRoot);
-            }
-
-            // 1.3.2.2
-            for (var j = 0; j < pool.length; j++) {
-              // 1.3.2.2.1
-              destributeNodeInto(pool[j], shadow);
-            }
-
-          } else {
-            // 1.3.3
-            this.distributionResolution(shadowTree);
-          }
-        }
-      }
-      for (var child = node.firstChild; child; child = child.nextSibling) {
-        this.distributionResolution(child);
+        renderNode = renderNode.append(node);
+        var renderer = getRendererForHost(node);
+        renderer.dirty = true;  // Need to rerender due to reprojection.
+        renderer.render(renderNode);
+      } else if (isInsertionPoint(node)) {
+        this.renderInsertionPoint(shadowRoot, renderNode, node, isNested);
+      } else if (isShadowInsertionPoint(node)) {
+        this.renderShadowInsertionPoint(shadowRoot, renderNode, node);
+      } else {
+        this.renderAsAnyDomTree(shadowRoot, renderNode, node, isNested);
       }
     },
 
-    // http://w3c.github.io/webcomponents/spec/shadow/#dfn-pool-distribution-algorithm
-    poolDistribution: function (node, pool) {
-      if (node instanceof HTMLShadowElement)
-        return;
-
-      if (node instanceof HTMLContentElement) {
-        var content = node;
-        this.updateDependentAttributes(content.getAttribute('select'));
-
-        // 1.1
-        for (var i = 0; i < pool.length; i++) {
-          var node = pool[i];
-          if (!node)
-            continue;
-          if (matches(node, content)) {
-            destributeNodeInto(node, content);
-            pool[i] = undefined;
-          }
-        }
-
-        // 1.2
-        // Fallback content
-        var distributedNodes = getDistributedNodes(content);
-        if (distributedNodes && distributedNodes.length === 0) {
-          for (var child = content.firstChild;
-               child;
-               child = child.nextSibling) {
-            destributeNodeInto(child, content);
-          }
-        }
-
-        return;
-      }
-
-      for (var child = node.firstChild; child; child = child.nextSibling) {
-        this.poolDistribution(child, pool);
-      }
-    },
-
-    buildRenderTree: function(renderNode, node) {
-      var children = this.compose(node);
-      for (var i = 0; i < children.length; i++) {
-        var child = children[i];
-        var childRenderNode = renderNode.append(child);
-        this.buildRenderTree(childRenderNode, child);
-      }
+    renderAsAnyDomTree: function(shadowRoot, renderNode, node, isNested) {
+      renderNode = renderNode.append(node);
 
       if (isShadowHost(node)) {
         var renderer = getRendererForHost(node);
-        renderer.dirty = false;
-      }
-
-    },
-
-    compose: function(node) {
-      var children = [];
-      var p = node.shadowRoot || node;
-      for (var child = p.firstChild; child; child = child.nextSibling) {
-        if (isInsertionPoint(child)) {
-          this.associateNode(p);
-          var distributedNodes = getDistributedNodes(child);
-          for (var j = 0; j < distributedNodes.length; j++) {
-            var distributedNode = distributedNodes[j];
-            if (isFinalDestination(child, distributedNode))
-              children.push(distributedNode);
-          }
-        } else {
-          children.push(child);
+        renderNode.skip = !renderer.dirty;
+        renderer.render(renderNode);
+      } else {
+        for (var child = node.firstChild; child; child = child.nextSibling) {
+          this.renderNode(shadowRoot, renderNode, child, isNested);
         }
       }
-      return children;
+    },
+
+    renderInsertionPoint: function(shadowRoot, renderNode, insertionPoint,
+                                   isNested) {
+      var distributedChildNodes = getDistributedChildNodes(insertionPoint);
+      if (distributedChildNodes.length) {
+        this.associateNode(insertionPoint);
+
+        for (var i = 0; i < distributedChildNodes.length; i++) {
+          var child = distributedChildNodes[i];
+          if (isInsertionPoint(child) && isNested)
+            this.renderInsertionPoint(shadowRoot, renderNode, child, isNested);
+          else
+            this.renderAsAnyDomTree(shadowRoot, renderNode, child, isNested);
+        }
+      } else {
+        this.renderFallbackContent(shadowRoot, renderNode, insertionPoint);
+      }
+      this.associateNode(insertionPoint.parentNode);
+    },
+
+    renderShadowInsertionPoint: function(shadowRoot, renderNode,
+                                         shadowInsertionPoint) {
+      var nextOlderTree = shadowRoot.olderShadowRoot;
+      if (nextOlderTree) {
+        assignToInsertionPoint(nextOlderTree, shadowInsertionPoint);
+        this.associateNode(shadowInsertionPoint.parentNode);
+        for (var node = nextOlderTree.firstChild;
+             node;
+             node = node.nextSibling) {
+          this.renderNode(nextOlderTree, renderNode, node, true);
+        }
+      } else {
+        this.renderFallbackContent(shadowRoot, renderNode,
+                                   shadowInsertionPoint);
+      }
+    },
+
+    renderFallbackContent: function(shadowRoot, renderNode, fallbackHost) {
+      this.associateNode(fallbackHost);
+      this.associateNode(fallbackHost.parentNode);
+      for (var node = fallbackHost.firstChild; node; node = node.nextSibling) {
+        this.renderAsAnyDomTree(shadowRoot, renderNode, node, false);
+      }
     },
 
     /**
@@ -4952,103 +4772,102 @@ window.ShadowDOMPolyfill = {};
       return this.attributes[name];
     },
 
+    // http://dvcs.w3.org/hg/webcomponents/raw-file/tip/spec/shadow/index.html#dfn-distribution-algorithm
+    distribute: function(tree, pool) {
+      var self = this;
+
+      visit(tree, isActiveInsertionPoint,
+          function(insertionPoint) {
+            resetDistributedChildNodes(insertionPoint);
+            self.updateDependentAttributes(
+                insertionPoint.getAttribute('select'));
+
+            for (var i = 0; i < pool.length; i++) {  // 1.2
+              var node = pool[i];  // 1.2.1
+              if (node === undefined)  // removed
+                continue;
+              if (matchesCriteria(node, insertionPoint)) {  // 1.2.2
+                distributeChildToInsertionPoint(node, insertionPoint);  // 1.2.2.1
+                pool[i] = undefined;  // 1.2.2.2
+              }
+            }
+          });
+    },
+
+    // http://dvcs.w3.org/hg/webcomponents/raw-file/tip/spec/shadow/index.html#dfn-tree-composition
+    treeComposition: function () {
+      var shadowHost = this.host;
+      var tree = shadowHost.shadowRoot;  // 1.
+      var pool = [];  // 2.
+
+      for (var child = shadowHost.firstChild;
+           child;
+           child = child.nextSibling) {  // 3.
+        if (isInsertionPoint(child)) {  // 3.2.
+          var reprojected = getDistributedChildNodes(child);  // 3.2.1.
+          // if reprojected is undef... reset it?
+          if (!reprojected || !reprojected.length)  // 3.2.2.
+            reprojected = getChildNodesSnapshot(child);
+          pool.push.apply(pool, reprojected);  // 3.2.3.
+        } else {
+          pool.push(child); // 3.3.
+        }
+      }
+
+      var shadowInsertionPoint, point;
+      while (tree) {  // 4.
+        // 4.1.
+        shadowInsertionPoint = undefined;  // Reset every iteration.
+        visit(tree, isActiveShadowInsertionPoint, function(point) {
+          shadowInsertionPoint = point;
+          return false;
+        });
+        point = shadowInsertionPoint;
+
+        this.distribute(tree, pool);  // 4.2.
+        if (point) {  // 4.3.
+          var nextOlderTree = tree.olderShadowRoot;  // 4.3.1.
+          if (!nextOlderTree) {
+            break;  // 4.3.1.1.
+          } else {
+            tree = nextOlderTree;  // 4.3.2.2.
+            assignToInsertionPoint(tree, point);  // 4.3.2.2.
+            continue;  // 4.3.2.3.
+          }
+        } else {
+          break;  // 4.4.
+        }
+      }
+    },
+
     associateNode: function(node) {
       node.impl.polymerShadowRenderer_ = this;
     }
   };
 
-  // http://w3c.github.io/webcomponents/spec/shadow/#dfn-pool-population-algorithm
-  function poolPopulation(node) {
-    var pool = [];
-    for (var child = node.firstChild; child; child = child.nextSibling) {
-      if (isInsertionPoint(child)) {
-        pool.push.apply(pool, getDistributedNodes(child));
-      } else {
-        pool.push(child);
-      }
-    }
-    return pool;
-  }
-
-  function getShadowInsertionPoint(node) {
-    if (node instanceof HTMLShadowElement)
-      return node;
-    if (node instanceof HTMLContentElement)
-      return null;
-    for (var child = node.firstChild; child; child = child.nextSibling) {
-      var res = getShadowInsertionPoint(child);
-      if (res)
-        return res;
-    }
-    return null;
-  }
-
-  function destributeNodeInto(child, insertionPoint) {
-    getDistributedNodes(insertionPoint).push(child);
-    var points = destinationInsertionPointsTable.get(child);
-    if (!points)
-      destinationInsertionPointsTable.set(child, [insertionPoint]);
-    else
-      points.push(insertionPoint);
-  }
-
-  function getDestinationInsertionPoints(node) {
-    return destinationInsertionPointsTable.get(node);
-  }
-
-  function resetDestinationInsertionPoints(node) {
-    // IE11 crashes when delete is used.
-    destinationInsertionPointsTable.set(node, undefined);
-  }
-
-  // AllowedSelectors :
-  //   TypeSelector
-  //   *
-  //   ClassSelector
-  //   IDSelector
-  //   AttributeSelector
-  var selectorStartCharRe = /^[*.#[a-zA-Z_|]/;
-
-  function matches(node, contentElement) {
-    var select = contentElement.getAttribute('select');
-    if (!select)
-      return true;
-
-    // Here we know the select attribute is a non empty string.
-    select = select.trim();
-    if (!select)
-      return true;
-
-    if (!(node instanceof Element))
-      return false;
-
-    if (!selectorStartCharRe.test(select))
-      return false;
-
-    try {
-      return node.matches(select);
-    } catch (ex) {
-      // Invalid selector.
-      return false;
-    }
-  }
-
-  function isFinalDestination(insertionPoint, node) {
-    var points = getDestinationInsertionPoints(node);
-    return points && points[points.length - 1] === insertionPoint;
-  }
-
   function isInsertionPoint(node) {
-    return node instanceof HTMLContentElement ||
-           node instanceof HTMLShadowElement;
+    // Should this include <shadow>?
+    return node instanceof HTMLContentElement;
+  }
+
+  function isActiveInsertionPoint(node) {
+    // <content> inside another <content> or <shadow> is considered inactive.
+    return node instanceof HTMLContentElement;
+  }
+
+  function isShadowInsertionPoint(node) {
+    return node instanceof HTMLShadowElement;
+  }
+
+  function isActiveShadowInsertionPoint(node) {
+    // <shadow> inside another <content> or <shadow> is considered inactive.
+    return node instanceof HTMLShadowElement;
   }
 
   function isShadowHost(shadowHost) {
     return shadowHost.shadowRoot;
   }
 
-  // Returns the shadow trees as an array, with the youngest tree at the
-  // beginning of the array.
   function getShadowTrees(host) {
     var trees = [];
 
@@ -5058,6 +4877,11 @@ window.ShadowDOMPolyfill = {};
     return trees;
   }
 
+  function assignToInsertionPoint(tree, point) {
+    insertionParentTable.set(tree, point);
+  }
+
+  // http://dvcs.w3.org/hg/webcomponents/raw-file/tip/spec/shadow/index.html#rendering-shadow-trees
   function render(host) {
     new ShadowRenderer(host).render();
   };
@@ -5085,21 +4909,15 @@ window.ShadowDOMPolyfill = {};
     return false;
   };
 
-  HTMLContentElement.prototype.getDistributedNodes =
-  HTMLShadowElement.prototype.getDistributedNodes = function() {
+  HTMLContentElement.prototype.getDistributedNodes = function() {
     // TODO(arv): We should only rerender the dirty ancestor renderers (from
     // the root and down).
     renderAllPending();
-    return getDistributedNodes(this);
+    return getDistributedChildNodes(this);
   };
 
-  Element.prototype.getDestinationInsertionPoints = function() {
-    renderAllPending();
-    return getDestinationInsertionPoints(this) || [];
-  };
-
-  HTMLContentElement.prototype.nodeIsInserted_ =
-  HTMLShadowElement.prototype.nodeIsInserted_ = function() {
+  HTMLShadowElement.prototype.nodeIsInserted_ =
+  HTMLContentElement.prototype.nodeIsInserted_ = function() {
     // Invalidate old renderer if any.
     this.invalidateShadowRenderer();
 
@@ -5112,11 +4930,11 @@ window.ShadowDOMPolyfill = {};
       renderer.invalidate();
   };
 
+  scope.eventParentsTable = eventParentsTable;
   scope.getRendererForHost = getRendererForHost;
   scope.getShadowTrees = getShadowTrees;
+  scope.insertionParentTable = insertionParentTable;
   scope.renderAllPending = renderAllPending;
-
-  scope.getDestinationInsertionPoints = getDestinationInsertionPoints;
 
   // Exposed for testing
   scope.visual = {
@@ -5515,10 +5333,6 @@ window.ShadowDOMPolyfill = {};
           new DOMImplementation(unwrap(this).implementation);
       implementationTable.set(this, implementation);
       return implementation;
-    },
-
-    get defaultView() {
-      return wrap(unwrap(this).defaultView);
     }
   });
 
@@ -5634,13 +5448,9 @@ window.ShadowDOMPolyfill = {};
       renderAllPending();
       return new Selection(originalGetSelection.call(unwrap(this)));
     },
-
-    get document() {
-      return wrap(unwrap(this).document);
-    }
   });
 
-  registerWrapper(OriginalWindow, Window, window);
+  registerWrapper(OriginalWindow, Window);
 
   scope.wrappers.Window = Window;
 

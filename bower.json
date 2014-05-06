@@ -1,7 +1,7 @@
 {
   "name": "shadowdom-polyfill",
   "description": "ShadowDOM polyfill for Web Components.",
-  "version": "0.0.2",
+  "version": "0.2.3",
   "author": "Arron Schaar",
   "keywords": [
     "polyfill",
