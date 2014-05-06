@@ -1,0 +1,18 @@
+{
+  "name": "shadowdom-polyfill",
+  "description": "ShadowDOM polyfill for Web Components.",
+  "version": "0.0.1",
+  "author": "Arron Schaar",
+  "keywords": [
+    "polyfill",
+    "web-components",
+    "x-tag"
+  ],
+  "main": [
+    "src/shadowdom.js"
+  ],
+  "dependencies": {
+    "WeakMap": "~0.2.1",
+    "observe-js": "~0.2.3"
+  }
+}

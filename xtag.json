@@ -1,0 +1,24 @@
+{
+  "name": "shadowdom-polyfill",
+  "tagName": "shadowdom",
+  "version": "0.0.1",
+  "author": "Arron Schaar",
+  "description": "Enables ShadomDOM for X-Tag components",
+  "demo": "demo/index.html",
+  "compatibility": {
+    "firefox": 5,
+    "chrome": 4,
+    "ie": 9,
+    "opera": 12,
+    "android": 2.1,
+    "ios": 4
+  },
+  "documentation": {
+    "description": "Enables ShadomDOM in X-Tag components",
+    "attributes": {},
+    "events": {},
+    "methods": {},
+    "getters": {},
+    "setters": {}
+  }
+}
