@@ -11,7 +11,6 @@
   <script type="text/javascript" src="dependencies.js"></script>
   <script type="text/javascript" src="../src/shadowdom.js"></script>
 
-
   <style type="text/css">
 
   </style>
@@ -24,9 +23,17 @@
 
 <script type="text/javascript">
 
-  document.addEventListener('WebComponentsReady', function(){
+var el = document.createElement('div');
+var shadow = el.createShadowRoot();
+shadow.innerHTML = '<label>Foo<ul><content select="li"></content></ul></label>';
 
-  });
+document.body.appendChild(el);
+
+['a','b','c'].forEach(function(item){
+  var elem = document.createElement('li');
+  elem.textContent = item;
+  el.appendChild(elem);
+});
 
 </script>
 
